@@ -481,8 +481,12 @@ def test_idempotency_whitespace_only_key_rejected(client):
 
 
 def test_concurrent_identical_idempotent_requests(client, db_session):
-    """Verify concurrent requests with the same Idempotency-Key do not cause 500 uniqueness crashes."""
+    """Verify concurrent requests with the same Idempotency-Key do not cause 500 uniqueness crashes.
+
+    Uses a threading.Barrier(6) to synchronize all worker threads to strike the endpoint simultaneously.
+    """
     import concurrent.futures
+    import threading
 
     payload = {
         "customer_name": "Concurrent Client",
@@ -493,7 +497,10 @@ def test_concurrent_identical_idempotent_requests(client, db_session):
     }
     headers = {"Idempotency-Key": "concurrent_key_alpha_777"}
 
+    barrier = threading.Barrier(6)
+
     def send_request():
+        barrier.wait()  # Synchronize all 6 workers before dispatch
         return client.post("/invoices/", json=payload, headers=headers)
 
     # Launch 6 concurrent requests
@@ -501,7 +508,6 @@ def test_concurrent_identical_idempotent_requests(client, db_session):
         futures = [executor.submit(send_request) for _ in range(6)]
         responses = [f.result() for f in futures]
 
-    status_codes = [r.status_code for r in responses]
     # Every request must succeed with either 201 (new) or 200 (replayed)
     for r in responses:
         assert r.status_code in (200, 201), f"Unexpected status code: {r.status_code}, body: {r.json()}"
@@ -517,30 +523,44 @@ def test_concurrent_identical_idempotent_requests(client, db_session):
 def test_concurrent_conflicting_idempotent_requests(client, db_session):
     """Verify true race condition between conflicting payloads using the same Idempotency-Key.
 
+    Uses a threading.Barrier(2) to ensure both worker threads release at the exact same instant,
+    maximizing contention at the database insertion boundary.
+
     Asserts that:
-    1. Both requests are dispatched concurrently on separate threads.
+    1. Both requests are synchronized via barrier and dispatched concurrently.
     2. Exactly one request wins the race and commits (HTTP 201 Created).
     3. The concurrent rival detects the payload mismatch and returns HTTP 409 Conflict (not 500).
     4. Exactly one invoice is persisted in the database with zero orphan rows.
+    5. The stored invoice matches whichever payload won the race.
+    6. Exactly one associated idempotency record exists and its payload matches the winner.
     """
     import concurrent.futures
+    import threading
+    import json
+    from app.models import IdempotencyRecord
 
     key = "concurrent_conflict_race_key_999"
     payload_a = {
-        "customer_name": "Payload A",
+        "customer_name": "Payload A Customer",
         "customer_email": "a@client.com",
         "items": [{"description": "Item A", "quantity": 1, "unit_price": "10.00"}],
     }
     payload_b = {
-        "customer_name": "Payload B",
+        "customer_name": "Payload B Customer",
         "customer_email": "b@client.com",
         "items": [{"description": "Item B", "quantity": 5, "unit_price": "50.00"}],
     }
 
+    barrier = threading.Barrier(2)
+
+    def worker(payload):
+        barrier.wait()  # Synchronize workers to release simultaneously
+        return client.post("/invoices/", json=payload, headers={"Idempotency-Key": key})
+
     # Dispatch both conflicting requests simultaneously in separate threads
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        fut_a = executor.submit(lambda: client.post("/invoices/", json=payload_a, headers={"Idempotency-Key": key}))
-        fut_b = executor.submit(lambda: client.post("/invoices/", json=payload_b, headers={"Idempotency-Key": key}))
+        fut_a = executor.submit(worker, payload_a)
+        fut_b = executor.submit(worker, payload_b)
         res_a = fut_a.result()
         res_b = fut_b.result()
 
@@ -548,11 +568,27 @@ def test_concurrent_conflicting_idempotent_requests(client, db_session):
     status_codes = sorted([res_a.status_code, res_b.status_code])
     assert status_codes == [201, 409], f"Expected exactly [201, 409], but got: {[res_a.status_code, res_b.status_code]}"
 
-    # Verify conflict error payload envelope
+    # Identify the winning response, conflict response, and winning payload
+    winner_res = res_a if res_a.status_code == 201 else res_b
     conflict_res = res_a if res_a.status_code == 409 else res_b
+    winner_payload = payload_a if res_a.status_code == 201 else payload_b
+
+    # Verify conflict error payload envelope
     assert conflict_res.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
     assert "was previously used with a different request payload" in conflict_res.json()["error"]["message"]
 
-    # Verify database has exactly 1 invoice
+    # Verify database state: exactly 1 invoice created
     assert db_session.query(Invoice).count() == 1
+    stored_invoice = db_session.query(Invoice).first()
+    assert stored_invoice is not None
+    assert stored_invoice.id == winner_res.json()["id"]
+    assert stored_invoice.customer_name == winner_payload["customer_name"]
+    assert stored_invoice.customer_email == winner_payload["customer_email"]
+
+    # Verify database state: exactly 1 idempotency record matching the winning invoice
+    records = db_session.query(IdempotencyRecord).filter(IdempotencyRecord.key == key).all()
+    assert len(records) == 1
+    stored_record_body = json.loads(records[0].response_body)
+    assert stored_record_body["id"] == stored_invoice.id
+    assert stored_record_body["customer_name"] == winner_payload["customer_name"]
 
