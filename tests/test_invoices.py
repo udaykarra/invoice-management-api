@@ -515,10 +515,17 @@ def test_concurrent_identical_idempotent_requests(client, db_session):
 
 
 def test_concurrent_conflicting_idempotent_requests(client, db_session):
-    """Verify concurrent requests with same key but differing payloads return 409 Conflict, not 500."""
+    """Verify true race condition between conflicting payloads using the same Idempotency-Key.
+
+    Asserts that:
+    1. Both requests are dispatched concurrently on separate threads.
+    2. Exactly one request wins the race and commits (HTTP 201 Created).
+    3. The concurrent rival detects the payload mismatch and returns HTTP 409 Conflict (not 500).
+    4. Exactly one invoice is persisted in the database with zero orphan rows.
+    """
     import concurrent.futures
 
-    key = "concurrent_conflict_key_999"
+    key = "concurrent_conflict_race_key_999"
     payload_a = {
         "customer_name": "Payload A",
         "customer_email": "a@client.com",
@@ -530,12 +537,22 @@ def test_concurrent_conflicting_idempotent_requests(client, db_session):
         "items": [{"description": "Item B", "quantity": 5, "unit_price": "50.00"}],
     }
 
-    # Ensure payload A is sent first or concurrently
-    res_a = client.post("/invoices/", json=payload_a, headers={"Idempotency-Key": key})
-    assert res_a.status_code == 201
+    # Dispatch both conflicting requests simultaneously in separate threads
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        fut_a = executor.submit(lambda: client.post("/invoices/", json=payload_a, headers={"Idempotency-Key": key}))
+        fut_b = executor.submit(lambda: client.post("/invoices/", json=payload_b, headers={"Idempotency-Key": key}))
+        res_a = fut_a.result()
+        res_b = fut_b.result()
 
-    # Sending payload B with the same key must return 409 Conflict (not 500)
-    res_b = client.post("/invoices/", json=payload_b, headers={"Idempotency-Key": key})
-    assert res_b.status_code == 409
-    assert res_b.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    # One request must succeed (201 Created), the rival must be rejected with 409 Conflict
+    status_codes = sorted([res_a.status_code, res_b.status_code])
+    assert status_codes == [201, 409], f"Expected exactly [201, 409], but got: {[res_a.status_code, res_b.status_code]}"
+
+    # Verify conflict error payload envelope
+    conflict_res = res_a if res_a.status_code == 409 else res_b
+    assert conflict_res.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert "was previously used with a different request payload" in conflict_res.json()["error"]["message"]
+
+    # Verify database has exactly 1 invoice
+    assert db_session.query(Invoice).count() == 1
 
