@@ -1,6 +1,6 @@
 # Invoice Management API (Production Reference Architecture)
 
-[![Build & Verify](https://github.com/your-username/invoice-management-api/actions/workflows/python-app.yml/badge.svg)](https://github.com/your-username/invoice-management-api/actions)
+[![Build & Verify](https://github.com/udaykarra/invoice-management-api/actions/workflows/python-app.yml/badge.svg)](https://github.com/udaykarra/invoice-management-api/actions)
 ![Python 3.10 | 3.11 | 3.12](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688)
 ![Pydantic v2](https://img.shields.io/badge/Pydantic-v2.6+-e92063)
@@ -95,7 +95,7 @@ flowchart TD
 ### 2. Setup Virtual Environment
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/invoice-management-api.git
+git clone https://github.com/udaykarra/invoice-management-api.git
 cd invoice-management-api
 
 # Create and activate virtual environment
