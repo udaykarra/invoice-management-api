@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, List, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models import InvoiceStatus
 
 
@@ -27,6 +27,14 @@ class InvoiceItemCreate(BaseModel):
         le=Decimal("999999999.99"),
         description="Unit price must be non-negative with up to 2 decimal places",
     )
+
+    @field_validator("unit_price")
+    @classmethod
+    def validate_decimal_scale(cls, v: Decimal) -> Decimal:
+        """Strictly enforce maximum of 2 decimal places on unit_price."""
+        if v.as_tuple().exponent < -2:
+            raise ValueError("unit_price must have at most 2 decimal places")
+        return v
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 

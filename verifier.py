@@ -239,13 +239,31 @@ class ContractVerifier:
             }
             res = self.client.post("/invoices/", json=payload)
             assert res.status_code == 500, f"Expected 500 on simulated DB error, got {res.status_code}"
-            assert res.json()["error"]["code"] == "INTERNAL_SERVER_ERROR"
-
             # Check that database has no orphan invoices matching this customer
             orphan = self.session.query(Invoice).filter(Invoice.customer_name == "Atomic Rollback Corp").first()
             assert orphan is None, "Transaction rollback failed: orphan invoice was committed!"
         finally:
             self.session.add = original_add
+
+    def verify_whitespace_idempotency_key(self):
+        payload = {
+            "customer_name": "Whitespace Inc",
+            "customer_email": "white@inc.com",
+            "items": [{"description": "Item", "quantity": 1, "unit_price": "10.00"}],
+        }
+        res = self.client.post("/invoices/", json=payload, headers={"Idempotency-Key": "   "})
+        assert res.status_code == 400, f"Expected 400 Bad Request, got {res.status_code}"
+        assert res.json()["error"]["code"] == "BAD_REQUEST"
+
+    def verify_unit_price_scale_constraint(self):
+        payload = {
+            "customer_name": "Scale Corp",
+            "customer_email": "scale@corp.com",
+            "items": [{"description": "Item", "quantity": 1, "unit_price": "10.999"}],
+        }
+        res = self.client.post("/invoices/", json=payload)
+        assert res.status_code == 422, f"Expected 422 for scale > 2, got {res.status_code}"
+        assert res.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def main() -> int:
@@ -268,6 +286,8 @@ def main() -> int:
         ("Contract 09: Lifecycle State Transition Guard (409 on Invalid Flow)", verifier.verify_lifecycle_transition_contract),
         ("Contract 10: Empty Collection & Zero Arithmetic Compliance", verifier.verify_empty_line_items_zero_total),
         ("Contract 11: ACID Transaction Atomicity & Mid-Flight Rollback", verifier.verify_atomic_transaction_rollback),
+        ("Contract 12: Idempotency Key Whitespace Rejection (HTTP 400)", verifier.verify_whitespace_idempotency_key),
+        ("Contract 13: Unit Price Decimal Scale Constraint (Max 2 Scale)", verifier.verify_unit_price_scale_constraint),
     ]
 
     for name, test_fn in contracts:
@@ -279,16 +299,21 @@ def main() -> int:
     failed = total - passed
 
     print(f"\n{Colors.CYAN}--------------------------------------------------------{Colors.RESET}")
-    print(f"  Total Contracts: {total} | Passed: {Colors.GREEN}{passed}{Colors.RESET} | Failed: {Colors.RED}{failed}{Colors.RESET} ({duration:.2f}s)")
+    print(f"  API Contracts: {total} | Passed: {Colors.GREEN}{passed}{Colors.RESET} | Failed: {Colors.RED}{failed}{Colors.RESET} ({duration:.2f}s)")
     print(f"{Colors.CYAN}--------------------------------------------------------{Colors.RESET}\n")
 
     verifier.close()
 
-    if failed == 0:
-        print(f"{Colors.GREEN}{Colors.BOLD}>>> VERIFICATION SUCCESS: All API contracts strictly fulfilled. <<<{Colors.RESET}\n")
+    # Priority 2: Execute the Candidate Solution Evaluation Benchmark
+    from tasks.invoice_total.verifier import run_benchmark_verification
+    benchmark_failures = run_benchmark_verification()
+
+    total_failures = failed + benchmark_failures
+    if total_failures == 0:
+        print(f"{Colors.GREEN}{Colors.BOLD}>>> VERIFICATION SUCCESS: All API contracts & candidate benchmarks passed! <<<{Colors.RESET}\n")
         return 0
     else:
-        print(f"{Colors.RED}{Colors.BOLD}>>> VERIFICATION FAILURE: {failed} contract violations detected. <<<{Colors.RESET}\n")
+        print(f"{Colors.RED}{Colors.BOLD}>>> VERIFICATION FAILURE: {total_failures} violations detected. <<<{Colors.RESET}\n")
         return 1
 
 

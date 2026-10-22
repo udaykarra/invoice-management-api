@@ -5,6 +5,7 @@ import json
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Optional, Tuple
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.errors import (
     EntityNotFoundException,
@@ -150,8 +151,26 @@ def create_invoice(
             db.add(idem_record)
 
         db.commit()
-        db.refresh(db_invoice)
         return db_invoice, True
+
+    except IntegrityError:
+        db.rollback()
+        # Handle concurrent race condition where another thread committed this idempotency key
+        if idempotency_key:
+            cleaned_key = idempotency_key.strip()
+            import time
+            for _ in range(10):
+                winner_rec = db.query(IdempotencyRecord).filter(IdempotencyRecord.key == cleaned_key).first()
+                if winner_rec:
+                    if winner_rec.request_hash == payload_hash:
+                        cached_data = json.loads(winner_rec.response_body)
+                        cached_invoice = get_invoice(db, cached_data["id"])
+                        if cached_invoice:
+                            return cached_invoice, False
+                    else:
+                        raise IdempotencyConflictException(cleaned_key)
+                time.sleep(0.02)
+        raise
 
     except Exception:
         db.rollback()

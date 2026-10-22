@@ -11,6 +11,7 @@ from app.config import settings
 from app.database import Base, engine, get_db
 from app.errors import (
     AppException,
+    BadRequestException,
     EntityNotFoundException,
     app_exception_handler,
     http_exception_handler,
@@ -84,6 +85,10 @@ def create_invoice_endpoint(
     - Subsequent identical submissions: Returns the cached invoice with HTTP 200 OK.
     - Subsequent differing submissions: Returns HTTP 409 Conflict.
     """
+    if idempotency_key is not None:
+        if not idempotency_key.strip():
+            raise BadRequestException("Idempotency-Key header cannot be empty or contain only whitespace.")
+
     invoice, is_new = crud.create_invoice(
         db=db,
         invoice_in=invoice_in,

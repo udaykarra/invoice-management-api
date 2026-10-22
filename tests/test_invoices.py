@@ -361,15 +361,16 @@ def test_atomic_transaction_rollback_on_item_failure(monkeypatch, client, db_ses
 
     Verify that rollback succeeds and zero orphan invoice header records exist in the database.
     """
-    original_add = db_session.add
+    from sqlalchemy.orm import Session
+    original_add = Session.add
 
-    def mock_add(instance):
+    def mock_add(self, instance, *args, **kwargs):
         # Allow Invoice to be added, but fail when adding the first InvoiceItem
         if isinstance(instance, InvoiceItem):
             raise RuntimeError("Simulated Database I/O / Constraint Failure on line items")
-        original_add(instance)
+        return original_add(self, instance, *args, **kwargs)
 
-    monkeypatch.setattr(db_session, "add", mock_add)
+    monkeypatch.setattr(Session, "add", mock_add)
 
     payload = {
         "customer_name": "Rollback Test Ltd",
@@ -451,3 +452,90 @@ def test_list_invoices_pagination_and_filtering(client):
     res_paid = client.get("/invoices/?status=PAID")
     assert res_paid.status_code == 200
     assert len(res_paid.json()) == 0
+
+
+def test_validation_unit_price_exceeding_two_decimal_places(client):
+    """Reject unit_price with more than 2 decimal places (e.g. 10.999) with HTTP 422."""
+    payload = {
+        "customer_name": "Scale Corp",
+        "customer_email": "scale@corp.com",
+        "items": [{"description": "Item", "quantity": 1, "unit_price": "10.999"}],
+    }
+    response = client.post("/invoices/", json=payload)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert "unit_price must have at most 2 decimal places" in str(response.json())
+
+
+def test_idempotency_whitespace_only_key_rejected(client):
+    """Reject an Idempotency-Key containing only whitespace with HTTP 400 Bad Request."""
+    payload = {
+        "customer_name": "Whitespace Org",
+        "customer_email": "white@org.com",
+        "items": [{"description": "Item", "quantity": 1, "unit_price": "10.00"}],
+    }
+    response = client.post("/invoices/", json=payload, headers={"Idempotency-Key": "    "})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "BAD_REQUEST"
+    assert "cannot be empty or contain only whitespace" in response.json()["error"]["message"]
+
+
+def test_concurrent_identical_idempotent_requests(client, db_session):
+    """Verify concurrent requests with the same Idempotency-Key do not cause 500 uniqueness crashes."""
+    import concurrent.futures
+
+    payload = {
+        "customer_name": "Concurrent Client",
+        "customer_email": "concurrent@client.com",
+        "currency": "USD",
+        "tax_rate": "0.0825",
+        "items": [{"description": "Concurrent Service", "quantity": 2, "unit_price": "75.00"}],
+    }
+    headers = {"Idempotency-Key": "concurrent_key_alpha_777"}
+
+    def send_request():
+        return client.post("/invoices/", json=payload, headers=headers)
+
+    # Launch 6 concurrent requests
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(send_request) for _ in range(6)]
+        responses = [f.result() for f in futures]
+
+    status_codes = [r.status_code for r in responses]
+    # Every request must succeed with either 201 (new) or 200 (replayed)
+    for r in responses:
+        assert r.status_code in (200, 201), f"Unexpected status code: {r.status_code}, body: {r.json()}"
+
+    # Exactly one invoice row created in DB
+    assert db_session.query(Invoice).count() == 1
+
+    # All responses must return the identical invoice ID
+    invoice_ids = {r.json()["id"] for r in responses}
+    assert len(invoice_ids) == 1
+
+
+def test_concurrent_conflicting_idempotent_requests(client, db_session):
+    """Verify concurrent requests with same key but differing payloads return 409 Conflict, not 500."""
+    import concurrent.futures
+
+    key = "concurrent_conflict_key_999"
+    payload_a = {
+        "customer_name": "Payload A",
+        "customer_email": "a@client.com",
+        "items": [{"description": "Item A", "quantity": 1, "unit_price": "10.00"}],
+    }
+    payload_b = {
+        "customer_name": "Payload B",
+        "customer_email": "b@client.com",
+        "items": [{"description": "Item B", "quantity": 5, "unit_price": "50.00"}],
+    }
+
+    # Ensure payload A is sent first or concurrently
+    res_a = client.post("/invoices/", json=payload_a, headers={"Idempotency-Key": key})
+    assert res_a.status_code == 201
+
+    # Sending payload B with the same key must return 409 Conflict (not 500)
+    res_b = client.post("/invoices/", json=payload_b, headers={"Idempotency-Key": key})
+    assert res_b.status_code == 409
+    assert res_b.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+

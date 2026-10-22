@@ -9,16 +9,17 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from app.config import settings
 
-# In SQLite, foreign keys are disabled by default. We enforce them here.
+# In SQLite, foreign keys and WAL mode are enabled for concurrency and integrity.
 @event.listens_for(Engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
-    """Enable foreign key constraints for SQLite connections."""
+    """Enable foreign key constraints and WAL mode for SQLite connections."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA journal_mode=WAL")
     cursor.close()
 
 
-connect_args = {"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+connect_args = {"check_same_thread": False, "timeout": 30} if "sqlite" in settings.DATABASE_URL else {}
 
 engine = create_engine(
     settings.DATABASE_URL,
