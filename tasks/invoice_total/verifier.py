@@ -1,70 +1,69 @@
+#!/usr/bin/env python3
+"""Multi-candidate verifier for invoice_total with subprocess isolation.
+
+Candidate solutions are evaluated in isolated Python subprocesses with:
+- Execution timeouts (5.0s per candidate).
+- Controlled input/output via structured JSON over stdout.
+- Runtime fault isolation (infinite loops, uncaught exceptions, and state mutations
+  cannot crash the harness).
+- Clear exit codes and diagnostic error reporting.
+
+Note: Subprocess execution provides runtime fault isolation, not an unrestricted
+OS-level security sandbox.
+"""
+
+import json
 import os
+import subprocess
 import sys
-
-# Ensure repository root is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-
 from typing import Tuple
 
-from tasks.invoice_total.contract import InvoiceTotalFunction, InvoiceTotals
-from tasks.invoice_total.test_cases import MALFORMED_TEST_CASES, VALID_TEST_CASES
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+EVAL_RUNNER = os.path.join(os.path.dirname(__file__), "run_candidate.py")
+TIMEOUT_SECONDS = 5.0
 
 
-def verify_implementation(candidate_fn: InvoiceTotalFunction) -> Tuple[bool, str]:
-    """Test a candidate function against all validity and malformed input contracts.
+def verify_candidate_isolated(candidate_rel_path: str) -> Tuple[bool, str]:
+    """Execute candidate verification inside an isolated subprocess with timeout."""
+    candidate_abs_path = os.path.join(REPO_ROOT, candidate_rel_path)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = REPO_ROOT
 
-    Returns:
-        (passed: bool, message: str)
-    """
-    # 1. Test Valid Functional Cases
-    for tc in VALID_TEST_CASES:
-        try:
-            result = candidate_fn(tc["items"], tc["tax_rate"])
-        except Exception as e:
-            return False, f"Failed on valid test '{tc['name']}': Raised unexpected exception: {e}"
+    try:
+        proc = subprocess.run(
+            [sys.executable, EVAL_RUNNER, candidate_abs_path],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECONDS,
+        )
+        stdout_clean = proc.stdout.strip()
+        if stdout_clean:
+            try:
+                data = json.loads(stdout_clean)
+                return bool(data.get("passed", False)), str(data.get("message", "No message"))
+            except json.JSONDecodeError:
+                pass
 
-        if not isinstance(result, InvoiceTotals):
-            return False, f"Return type must be InvoiceTotals, got {type(result).__name__}"
-
-        if result.subtotal != tc["expected_subtotal"]:
-            return False, f"Test '{tc['name']}': subtotal mismatch. Expected {tc['expected_subtotal']}, got {result.subtotal}"
-
-        if result.tax_amount != tc["expected_tax"]:
-            return False, f"Test '{tc['name']}': tax_amount mismatch. Expected {tc['expected_tax']}, got {result.tax_amount}"
-
-        if result.total_amount != tc["expected_total"]:
-            return False, f"Test '{tc['name']}': total_amount mismatch. Expected {tc['expected_total']}, got {result.total_amount}"
-
-    # 2. Test Malformed / Negative Cases
-    for tc in MALFORMED_TEST_CASES:
-        try:
-            candidate_fn(tc["items"], tc["tax_rate"])
-            return False, f"Test '{tc['name']}': Expected {tc['expected_error'].__name__} was NOT raised."
-        except Exception as e:
-            if not isinstance(e, tc["expected_error"]):
-                return False, f"Test '{tc['name']}': Expected {tc['expected_error'].__name__}, but caught {type(e).__name__}: {e}"
-
-    return True, "All test cases passed."
+        err_msg = proc.stderr.strip() or f"Subprocess exited with code {proc.returncode}"
+        return False, err_msg
+    except subprocess.TimeoutExpired:
+        return False, f"TIMEOUT: Candidate exceeded {TIMEOUT_SECONDS}s execution limit"
+    except Exception as e:
+        return False, f"Subprocess invocation failure: {type(e).__name__}: {str(e)}"
 
 
 def run_benchmark_verification() -> int:
-    """Run verification across reference, valid variants, and deliberately flawed implementations."""
-    from tasks.invoice_total.reference import calculate_invoice_totals as ref_impl
-    from tasks.invoice_total.solutions.candidate_invalid_bankers import calculate_invoice_totals as invalid_bankers
-    from tasks.invoice_total.solutions.candidate_invalid_float import calculate_invoice_totals as invalid_float
-    from tasks.invoice_total.solutions.candidate_invalid_negative import calculate_invoice_totals as invalid_negative
-    from tasks.invoice_total.solutions.candidate_invalid_unscaled import calculate_invoice_totals as invalid_unscaled
-    from tasks.invoice_total.solutions.candidate_valid_functional import calculate_invoice_totals as valid_b
-    from tasks.invoice_total.solutions.candidate_valid_iterative import calculate_invoice_totals as valid_a
-
+    """Run verification across reference, valid variants, and flawed implementations."""
     candidates = [
-        ("Reference Implementation", ref_impl, True),
-        ("Candidate A (Valid Iterative)", valid_a, True),
-        ("Candidate B (Valid Functional)", valid_b, True),
-        ("Candidate Flawed 1 (Float Precision Drift)", invalid_float, False),
-        ("Candidate Flawed 2 (Banker's Rounding)", invalid_bankers, False),
-        ("Candidate Flawed 3 (Unscaled Decimal Acceptance)", invalid_unscaled, False),
-        ("Candidate Flawed 4 (Negative Quantity Accepted)", invalid_negative, False),
+        ("Reference Implementation", "tasks/invoice_total/reference.py", True),
+        ("Candidate A (Valid Iterative)", "tasks/invoice_total/solutions/candidate_valid_iterative.py", True),
+        ("Candidate B (Valid Functional)", "tasks/invoice_total/solutions/candidate_valid_functional.py", True),
+        ("Candidate Flawed 1 (Float Precision Drift)", "tasks/invoice_total/solutions/candidate_invalid_float.py", False),
+        ("Candidate Flawed 2 (Banker's Rounding)", "tasks/invoice_total/solutions/candidate_invalid_bankers.py", False),
+        ("Candidate Flawed 3 (Unscaled Decimal Acceptance)", "tasks/invoice_total/solutions/candidate_invalid_unscaled.py", False),
+        ("Candidate Flawed 4 (Negative Quantity Accepted)", "tasks/invoice_total/solutions/candidate_invalid_negative.py", False),
     ]
 
     print("\n------------------------------------------------------------")
@@ -72,8 +71,8 @@ def run_benchmark_verification() -> int:
     print("------------------------------------------------------------")
 
     failures = 0
-    for name, fn, expected_pass in candidates:
-        passed, msg = verify_implementation(fn)
+    for name, rel_path, expected_pass in candidates:
+        passed, msg = verify_candidate_isolated(rel_path)
         if passed == expected_pass:
             status = "\033[92m[CORRECT BEHAVIOR]\033[0m"
             outcome = "Passed (as expected)" if passed else f"Rejected (as expected: {msg})"

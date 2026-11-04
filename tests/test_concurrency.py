@@ -64,11 +64,12 @@ def test_concurrent_identical_requests(client, db_session, worker_count):
     assert 201 in status_codes, f"Expected at least one 201 Created among {status_codes}"
     assert status_codes.count(201) == 1, f"Expected exactly one 201 Created, got: {status_codes.count(201)}"
 
-    # All non-201 responses must be 200 OK with the replay header
+    # All non-201 responses must be 200 OK with the replay header and original status
     replay_responses = [r for r in responses if r.status_code != 201]
     for r in replay_responses:
         assert r.status_code == 200, f"Expected 200 replay, got {r.status_code}: {r.json()}"
         assert r.headers.get("X-Idempotent-Replay") == "true"
+        assert r.headers.get("X-Original-Status-Code") == "201"
 
     # All responses must return the identical invoice ID and totals
     invoice_ids = {r.json()["id"] for r in responses}
@@ -184,6 +185,7 @@ def test_idempotency_original_response_snapshot_replay(client, db_session):
     res_replay = client.post("/invoices/", json=payload, headers={"Idempotency-Key": key})
     assert res_replay.status_code == 200
     assert res_replay.headers.get("X-Idempotent-Replay") == "true"
+    assert res_replay.headers.get("X-Original-Status-Code") == "201"
     replay_data = res_replay.json()
     assert replay_data["id"] == inv_id
     assert replay_data["status"] == "ISSUED", (

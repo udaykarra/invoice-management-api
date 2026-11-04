@@ -15,8 +15,11 @@ from app.config import settings
 # In SQLite, foreign keys, WAL mode, and busy timeout are enabled for concurrency and integrity.
 @event.listens_for(Engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
-    """Enable foreign key constraints, WAL mode, and busy timeout for SQLite connections."""
-    if "sqlite" in settings.DATABASE_URL:
+    """Enable foreign key constraints, WAL mode, and busy timeout only when active dialect is SQLite."""
+    dialect = getattr(connection_record, "dialect", None)
+    dialect_name = getattr(dialect, "name", None)
+    is_sqlite = dialect_name == "sqlite" or dbapi_connection.__class__.__module__.startswith("sqlite3")
+    if is_sqlite:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")

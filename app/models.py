@@ -83,7 +83,17 @@ class InvoiceItem(Base):
 
 
 class IdempotencyRecord(Base):
-    """Audit table for idempotency keys to guarantee at-most-once mutation semantics."""
+    """Audit table for idempotency keys to guarantee at-most-once mutation semantics.
+
+    Fields:
+    - key: Primary key constraint enforcing at-most-once write guarantee.
+    - request_path: Target API route for audit traceability.
+    - request_hash: SHA-256 fingerprint of the canonicalized request JSON.
+    - response_code: HTTP status code (201) when the original transaction was committed.
+    - response_body: Immutable JSON snapshot of the created response, ensuring strict
+      replay fidelity even if invoice lifecycle status is later modified (e.g. PAID).
+    - created_at: UTC timestamp when the original idempotency record was created.
+    """
 
     __tablename__ = "idempotency_records"
 

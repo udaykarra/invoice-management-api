@@ -143,6 +143,7 @@ class ContractVerifier:
         res2 = self.client.post("/invoices/", json=payload, headers=headers)
         assert res2.status_code == 200, f"Expected replay 200, got {res2.status_code}"
         assert res2.headers.get("X-Idempotent-Replay") == "true", "Missing X-Idempotent-Replay header"
+        assert res2.headers.get("X-Original-Status-Code") == "201", "Missing X-Original-Status-Code header"
         id2 = res2.json()["id"]
         assert id1 == id2, f"Replay IDs do not match: {id1} vs {id2}"
 

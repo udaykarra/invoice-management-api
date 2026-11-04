@@ -78,7 +78,7 @@ MUTATIONS = [
         "file": os.path.join(REPO_ROOT, "app", "crud.py"),
         "target": """    subtotal = Decimal("0.00")
     for item in items:
-        line_total = calculate_line_total(item.quantity, item.unit_price)
+        line_total = calculate_line_total(int(item.quantity), Decimal(str(item.unit_price)))
         subtotal += line_total
 
     subtotal = round_currency(subtotal)
@@ -113,7 +113,7 @@ MUTATIONS = [
         "name": "Idempotency conflict detection removed (payload mismatch ignored)",
         "file": os.path.join(REPO_ROOT, "app", "crud.py"),
         "target": "raise IdempotencyConflictException(cleaned_key)",
-        "replacement": "return InvoiceResponse.model_validate_json(existing_rec.response_body), False",
+        "replacement": "return cached_response, False, orig_code",
         "test": "tests/test_invoices.py::test_idempotency_differing_payload_returns_409_conflict",
     },
     {

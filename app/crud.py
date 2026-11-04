@@ -6,7 +6,7 @@ import random
 import time
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -18,7 +18,7 @@ from app.errors import (
     InvalidStateTransitionException,
 )
 from app.models import IdempotencyRecord, Invoice, InvoiceItem, InvoiceStatus
-from app.schemas import InvoiceCreate, InvoiceResponse
+from app.schemas import InvoiceCreate, InvoiceItemCreate, InvoiceResponse
 
 TWO_PLACES = Decimal("0.01")
 
@@ -37,7 +37,7 @@ def calculate_line_total(quantity: int, unit_price: Decimal) -> Decimal:
 
 
 def calculate_invoice_totals(
-    items: Sequence[Any],
+    items: Sequence[Union[InvoiceItemCreate, InvoiceItem]],
     tax_rate: Decimal,
 ) -> Tuple[Decimal, Decimal, Decimal]:
     """Calculate subtotal, tax amount, and grand total using exact Decimal arithmetic.
@@ -46,7 +46,7 @@ def calculate_invoice_totals(
     """
     subtotal = Decimal("0.00")
     for item in items:
-        line_total = calculate_line_total(item.quantity, item.unit_price)
+        line_total = calculate_line_total(int(item.quantity), Decimal(str(item.unit_price)))
         subtotal += line_total
 
     subtotal = round_currency(subtotal)
@@ -83,18 +83,18 @@ def create_invoice(
     db: Session,
     invoice_in: InvoiceCreate,
     idempotency_key: Optional[str] = None,
-) -> Tuple[Union[Invoice, InvoiceResponse], bool]:
+) -> Tuple[Union[Invoice, InvoiceResponse], bool, int]:
     """Create a new invoice atomically.
 
     Guarantees:
     - ACID Transaction: If any step fails, entire transaction is rolled back.
-    - Idempotency: Replaying with identical key returns cached original response (is_new=False).
+    - Idempotency: Replaying with identical key returns cached original response snapshot (is_new=False).
     - Conflict Detection: Replaying key with differing payload raises 409 Conflict.
     - Exact Arithmetic: All totals calculated with Decimal ROUND_HALF_UP.
     - Concurrency Safety: Bounded retries with exponential backoff & jitter handle SQLite locks.
 
     Returns:
-        Tuple of (invoice_or_response, is_new: bool)
+        Tuple of (invoice_or_response, is_new: bool, response_code: int)
     """
     payload_dict = invoice_in.model_dump(mode="json")
     payload_hash = compute_payload_hash(payload_dict)
@@ -106,7 +106,8 @@ def create_invoice(
             if existing_rec.request_hash == payload_hash:
                 # Payload matches: replay exact original response snapshot
                 cached_response = InvoiceResponse.model_validate_json(str(existing_rec.response_body))
-                return cached_response, False
+                orig_code = int(existing_rec.response_code) if existing_rec.response_code else 201
+                return cached_response, False, orig_code
             else:
                 # Key reused with differing payload: reject with 409 Conflict
                 raise IdempotencyConflictException(cleaned_key)
@@ -157,7 +158,7 @@ def create_invoice(
                 db.add(idem_record)
 
             db.commit()
-            return db_invoice, True
+            return db_invoice, True, 201
 
         except (IntegrityError, OperationalError) as exc:
             db.rollback()
@@ -175,7 +176,8 @@ def create_invoice(
                         if winner_rec:
                             if winner_rec.request_hash == payload_hash:
                                 cached_response = InvoiceResponse.model_validate_json(str(winner_rec.response_body))
-                                return cached_response, False
+                                orig_code = int(winner_rec.response_code) if winner_rec.response_code else 201
+                                return cached_response, False, orig_code
                             else:
                                 raise IdempotencyConflictException(cleaned_key)
                     except OperationalError:

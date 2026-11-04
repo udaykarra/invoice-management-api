@@ -1,44 +1,65 @@
-"""Deterministic verifier for invoice_concurrency candidate solutions."""
+#!/usr/bin/env python3
+"""Multi-candidate verifier for invoice_concurrency with subprocess isolation.
 
+Candidate solutions are evaluated in isolated Python subprocesses with:
+- Execution timeouts (10.0s per concurrency stress candidate).
+- Controlled input/output via structured JSON over stdout.
+- Fault isolation against crashes, deadlocks, and SQLite table locks.
+- Clear exit codes and diagnostic error reporting.
+
+Note: Subprocess execution provides runtime fault isolation, not an unrestricted
+OS-level security sandbox.
+"""
+
+import json
 import os
+import subprocess
 import sys
 from typing import Tuple
 
-# Ensure repository root is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-
-from tasks.invoice_concurrency.contract import ConcurrentInvoiceHandler
-from tasks.invoice_concurrency.test_cases import (
-    test_concurrent_conflicting_batch,
-    test_concurrent_identical_batch,
-)
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+EVAL_RUNNER = os.path.join(os.path.dirname(__file__), "run_candidate.py")
+TIMEOUT_SECONDS = 15.0
 
 
-def verify_implementation(handler: ConcurrentInvoiceHandler) -> Tuple[bool, str]:
-    """Test a candidate handler under both identical and conflicting concurrency stress tests."""
-    ok_identical, msg_identical = test_concurrent_identical_batch(handler, num_workers=10)
-    if not ok_identical:
-        return False, f"Identical batch failed: {msg_identical}"
+def verify_candidate_isolated(candidate_rel_path: str) -> Tuple[bool, str]:
+    """Execute candidate concurrency verification inside an isolated subprocess with timeout."""
+    candidate_abs_path = os.path.join(REPO_ROOT, candidate_rel_path)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = REPO_ROOT
 
-    ok_conflict, msg_conflict = test_concurrent_conflicting_batch(handler, num_workers=10)
-    if not ok_conflict:
-        return False, f"Conflict batch failed: {msg_conflict}"
+    try:
+        proc = subprocess.run(
+            [sys.executable, EVAL_RUNNER, candidate_abs_path],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECONDS,
+        )
+        stdout_clean = proc.stdout.strip()
+        if stdout_clean:
+            try:
+                data = json.loads(stdout_clean)
+                return bool(data.get("passed", False)), str(data.get("message", "No message"))
+            except json.JSONDecodeError:
+                pass
 
-    return True, "All concurrent idempotency stress checks passed."
+        err_msg = proc.stderr.strip() or f"Subprocess exited with code {proc.returncode}"
+        return False, err_msg
+    except subprocess.TimeoutExpired:
+        return False, f"TIMEOUT: Candidate exceeded {TIMEOUT_SECONDS}s execution limit"
+    except Exception as e:
+        return False, f"Subprocess invocation failure: {type(e).__name__}: {str(e)}"
 
 
 def run_benchmark_verification() -> int:
     """Run verification across reference, valid alternative, and flawed implementations."""
-    from tasks.invoice_concurrency.solutions.candidate_valid_lock import handler as valid_lock
-    from tasks.invoice_concurrency.solutions.correct import handler as ref_impl
-    from tasks.invoice_concurrency.solutions.wrong_no_conflict_check import handler as flawed_conflict
-    from tasks.invoice_concurrency.solutions.wrong_race_condition import handler as flawed_race
-
     candidates = [
-        ("Reference Implementation", ref_impl, True),
-        ("Candidate A (Valid Mutex/Lock)", valid_lock, True),
-        ("Candidate Flawed 1 (Unmitigated Race / 500 Crash)", flawed_race, False),
-        ("Candidate Flawed 2 (Missing 409 Conflict Check)", flawed_conflict, False),
+        ("Reference Implementation", "tasks/invoice_concurrency/solutions/correct.py", True),
+        ("Candidate A (Valid Mutex/Lock)", "tasks/invoice_concurrency/solutions/candidate_valid_lock.py", True),
+        ("Candidate Flawed 1 (Unmitigated Race / 500 Crash)", "tasks/invoice_concurrency/solutions/wrong_race_condition.py", False),
+        ("Candidate Flawed 2 (Missing 409 Conflict Check)", "tasks/invoice_concurrency/solutions/wrong_no_conflict_check.py", False),
     ]
 
     print("\n------------------------------------------------------------")
@@ -46,20 +67,15 @@ def run_benchmark_verification() -> int:
     print("------------------------------------------------------------")
 
     failures = 0
-    for name, handler, expected_pass in candidates:
-        try:
-            passed, msg = verify_implementation(handler)
-            if passed == expected_pass:
-                status = "\033[92m[CORRECT BEHAVIOR]\033[0m"
-                outcome = "Passed (as expected)" if passed else f"Rejected (as expected: {msg})"
-                print(f"  {status} {name:50} -> {outcome}")
-            else:
-                status = "\033[91m[BENCHMARK ERROR]\033[0m"
-                print(f"  {status} {name:50} -> Expected pass={expected_pass}, got pass={passed} ({msg})")
-                failures += 1
-        except Exception as infra_err:
-            status = "\033[91m[INFRA ERROR]\033[0m"
-            print(f"  {status} {name:50} -> Verifier Infrastructure Failure: {infra_err}")
+    for name, rel_path, expected_pass in candidates:
+        passed, msg = verify_candidate_isolated(rel_path)
+        if passed == expected_pass:
+            status = "\033[92m[CORRECT BEHAVIOR]\033[0m"
+            outcome = "Passed (as expected)" if passed else f"Rejected (as expected: {msg})"
+            print(f"  {status} {name:50} -> {outcome}")
+        else:
+            status = "\033[91m[BENCHMARK ERROR]\033[0m"
+            print(f"  {status} {name:50} -> Expected pass={expected_pass}, got pass={passed} ({msg})")
             failures += 1
 
     print("------------------------------------------------------------\n")

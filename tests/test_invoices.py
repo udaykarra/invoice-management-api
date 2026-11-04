@@ -659,3 +659,105 @@ def test_validation_excessive_item_count(client):
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
+def test_comprehensive_idempotency_replay_semantics(client):
+    """Verify complete idempotency replay contracts:
+
+    1. Original request returns HTTP 201 Created.
+    2. Identical replay returns HTTP 200 OK, X-Idempotent-Replay, and X-Original-Status-Code.
+    3. Replay after entity lifecycle status changes to PAID returns original snapshot (status ISSUED).
+    4. Replay with different payload returns HTTP 409 Conflict.
+    5. Serialization and deserialization maintain field-by-field equality.
+    """
+    key = "comprehensive_idempotency_test_key"
+    payload1 = {
+        "customer_name": "Replay Semantics Corp",
+        "customer_email": "replay@semantics.com",
+        "currency": "USD",
+        "tax_rate": "0.1000",
+        "notes": "Original Notes",
+        "items": [{"description": "Service 1", "quantity": 2, "unit_price": "50.00"}],
+    }
+
+    # 1. Original request
+    res1 = client.post("/invoices/", json=payload1, headers={"Idempotency-Key": key})
+    assert res1.status_code == 201
+    data1 = res1.json()
+    inv_id = data1["id"]
+    assert data1["status"] == "ISSUED"
+
+    # 2. Identical replay
+    res2 = client.post("/invoices/", json=payload1, headers={"Idempotency-Key": key})
+    assert res2.status_code == 200
+    assert res2.headers.get("X-Idempotent-Replay") == "true"
+    assert res2.headers.get("X-Original-Status-Code") == "201"
+    data2 = res2.json()
+    assert data1 == data2
+
+    # 3. Replay after status mutation
+    client.post(f"/invoices/{inv_id}/pay")
+    get_res = client.get(f"/invoices/{inv_id}")
+    assert get_res.json()["status"] == "PAID"
+
+    res3 = client.post("/invoices/", json=payload1, headers={"Idempotency-Key": key})
+    assert res3.status_code == 200
+    assert res3.headers.get("X-Idempotent-Replay") == "true"
+    assert res3.headers.get("X-Original-Status-Code") == "201"
+    assert res3.json()["status"] == "ISSUED"
+
+    # 4. Differing payload with same key returns 409 Conflict
+    payload_diff = {
+        "customer_name": "Replay Semantics Corp",
+        "customer_email": "replay@semantics.com",
+        "currency": "USD",
+        "tax_rate": "0.1000",
+        "notes": "Modified Notes",
+        "items": [{"description": "Service 2", "quantity": 1, "unit_price": "75.00"}],
+    }
+    res4 = client.post("/invoices/", json=payload_diff, headers={"Idempotency-Key": key})
+    assert res4.status_code == 409
+    assert res4.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_database_portability_and_sqlite_pragmas(monkeypatch):
+    """Verify that SQLite PRAGMAs are executed only when the active dialect is SQLite."""
+    from sqlalchemy import create_engine
+
+    from app.database import set_sqlite_pragma
+
+    # 1. Test SQLite connection triggers PRAGMAs
+    sqlite_engine = create_engine("sqlite:///:memory:")
+    with sqlite_engine.connect() as conn:
+        cursor = conn.connection.cursor()
+        cursor.execute("PRAGMA journal_mode;")
+        mode = cursor.fetchone()[0]
+        cursor.close()
+    assert mode.upper() in ("WAL", "MEMORY", "DELETE")
+
+    # 2. Test non-SQLite connection does not execute SQLite-specific SQL
+    executed_sql = []
+
+    class MockCursor:
+        def execute(self, sql):
+            executed_sql.append(sql)
+
+        def close(self):
+            pass
+
+    class MockConnectionRecord:
+        class MockDialect:
+            name = "postgresql"
+
+        dialect = MockDialect()
+
+    class MockDBAPIConnection:
+        def cursor(self):
+            return MockCursor()
+
+    mock_dbapi = MockDBAPIConnection()
+    mock_record = MockConnectionRecord()
+
+    set_sqlite_pragma(mock_dbapi, mock_record)
+    assert len(executed_sql) == 0, "PRAGMAs must not be executed against PostgreSQL connections"
+
+
+

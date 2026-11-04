@@ -93,7 +93,7 @@ def create_invoice_endpoint(
         if len(stripped_key) > 128:
             raise BadRequestException("Idempotency-Key header cannot exceed 128 characters.")
 
-    invoice, is_new = crud.create_invoice(
+    invoice, is_new, orig_code = crud.create_invoice(
         db=db,
         invoice_in=invoice_in,
         idempotency_key=idempotency_key,
@@ -101,6 +101,9 @@ def create_invoice_endpoint(
     if not is_new:
         response.status_code = status.HTTP_200_OK
         response.headers["X-Idempotent-Replay"] = "true"
+        response.headers["X-Original-Status-Code"] = str(orig_code)
+    else:
+        response.status_code = orig_code
     return invoice
 
 
