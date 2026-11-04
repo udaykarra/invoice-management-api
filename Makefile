@@ -1,4 +1,4 @@
-.PHONY: install run test test-concurrency test-postgres mutation verify lint typecheck test-all help
+.PHONY: install install-locked run test test-concurrency test-postgres mutation verify lint typecheck test-all help
 
 PYTHON ?= python
 PIP ?= pip
@@ -6,6 +6,7 @@ PIP ?= pip
 help:
 	@echo "Available commands:"
 	@echo "  make install           Install development and test dependencies"
+	@echo "  make install-locked    Install exact pinned dependencies with SHA-256 hash checks"
 	@echo "  make run               Run local FastAPI development server"
 	@echo "  make test              Run core unit and validation test suite"
 	@echo "  make test-concurrency  Run concurrent idempotency stress tests"
@@ -18,6 +19,9 @@ help:
 
 install:
 	$(PIP) install -r requirements-dev.txt
+
+install-locked:
+	$(PIP) install --require-hashes -r requirements-dev.lock
 
 run:
 	uvicorn app.main:app --reload --port 8000

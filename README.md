@@ -5,7 +5,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688)
 ![Pydantic v2](https://img.shields.io/badge/Pydantic-v2.6+-e92063)
 ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0+-d71f00)
-![Tests](https://img.shields.io/badge/Tests-43%20Collected-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-45%20Collected%20%7C%2043%20Passed-brightgreen)
 ![Coverage](https://img.shields.io/badge/Coverage-92%25-brightgreen)
 ![Contracts](https://img.shields.io/badge/Contract%20Verifier-19%2F19%20Passed-success)
 ![Mutation Score](https://img.shields.io/badge/Mutation%20Score-100%25%20(10%2F10)-success)
@@ -200,7 +200,7 @@ Exceptions map to structured HTTP response envelopes with machine-readable error
 
 ## 10. Automated Testing
 
-The automated test suite contains **43 collected tests** across SQLite and PostgreSQL:
+The automated test suite contains **45 collected tests** (43 passed, 2 PostgreSQL tests skipped when local PostgreSQL instance is unavailable):
 
 ```bash
 # Run complete test suite
@@ -214,8 +214,8 @@ pytest --cov=app --cov-report=term-missing
 ```
 
 ### Coverage Summary:
-- Total Statements: `363`
-- Covered: `334`
+- Total Statements: `370`
+- Covered: `341`
 - Statement Coverage: **92%**
 
 ---
@@ -398,13 +398,17 @@ source .venv/bin/activate
 # On Windows:
 .\.venv\Scripts\Activate.ps1
 
-# Install development dependencies
+# Install development dependencies (standard ranges)
 pip install -r requirements-dev.txt
+
+# Or install with exact cryptographic SHA-256 hash verification:
+pip install --require-hashes -r requirements-dev.lock
 ```
 
 ### Makefile Shortcuts:
 ```bash
-make install           # Install dependencies
+make install           # Install development dependencies
+make install-locked    # Install exact pinned dependencies with SHA-256 hash checks
 make run               # Run development server
 make test              # Run unit tests
 make test-concurrency  # Run concurrency stress tests

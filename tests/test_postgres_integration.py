@@ -34,19 +34,13 @@ POSTGRES_TEST_URL = os.getenv(
 def is_postgres_available() -> bool:
     """Check whether the PostgreSQL test instance is reachable."""
     try:
+        from sqlalchemy import text
         engine = create_engine(POSTGRES_TEST_URL, pool_pre_ping=True)
         with engine.connect() as conn:
-            conn.execute(Base.metadata.tables["invoices"].select().limit(1) if "invoices" in Base.metadata.tables else None) # type: ignore
+            conn.execute(text("SELECT 1"))
         return True
     except Exception:
-        # Check raw connection
-        try:
-            engine = create_engine(POSTGRES_TEST_URL, pool_pre_ping=True)
-            with engine.connect() as conn:
-                pass
-            return True
-        except Exception:
-            return False
+        return False
 
 
 pytestmark = pytest.mark.skipif(

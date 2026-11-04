@@ -19,10 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -g 10001 appgroup && \
     useradd -u 10001 -g appgroup -s /bin/bash -m appuser
 
-# Install pinned Python dependencies
-COPY requirements.txt .
+# Install pinned Python dependencies with cryptographic hash verification
+COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Copy application source code
 COPY app/ ./app/
