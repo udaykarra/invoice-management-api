@@ -1,6 +1,7 @@
 """Deterministic test suite for validating candidate implementations of invoice_total."""
 
 from decimal import Decimal
+
 from tasks.invoice_total.contract import LineItem
 
 VALID_TEST_CASES = [

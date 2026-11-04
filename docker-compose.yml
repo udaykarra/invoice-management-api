@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  # SQLite-backed application (default development environment)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: invoice_api_sqlite
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=Invoice Management API (SQLite)
+      - DATABASE_URL=sqlite:////app/data/invoices.db
+      - DEBUG=true
+    volumes:
+      - sqlite_data:/app/data
+
+  # PostgreSQL database instance for integration testing & high-concurrency verification
+  postgres:
+    image: postgres:16-alpine
+    container_name: invoice_api_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-invoice_test}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-invoice_test}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL-backed application instance
+  app-postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: invoice_api_pg_app
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    environment:
+      - APP_NAME=Invoice Management API (PostgreSQL)
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-invoice_test}
+      - DEBUG=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  sqlite_data:
+    driver: local
+  postgres_data:
+    driver: local
+

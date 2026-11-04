@@ -3,7 +3,9 @@
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, List, Optional
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 from app.models import InvoiceStatus
 
 
@@ -19,7 +21,8 @@ class InvoiceItemCreate(BaseModel):
     quantity: int = Field(
         ...,
         gt=0,
-        description="Quantity must be a positive integer greater than zero",
+        le=1_000_000,
+        description="Quantity must be a positive integer between 1 and 1,000,000",
     )
     unit_price: Decimal = Field(
         ...,
@@ -32,7 +35,8 @@ class InvoiceItemCreate(BaseModel):
     @classmethod
     def validate_decimal_scale(cls, v: Decimal) -> Decimal:
         """Strictly enforce maximum of 2 decimal places on unit_price."""
-        if v.as_tuple().exponent < -2:
+        exp = v.as_tuple().exponent
+        if isinstance(exp, int) and exp < -2:
             raise ValueError("unit_price must have at most 2 decimal places")
         return v
 
@@ -75,17 +79,36 @@ class InvoiceCreate(BaseModel):
         default=Decimal("0.00"),
         ge=Decimal("0.00"),
         le=Decimal("1.00"),
-        description="Tax rate as a decimal percentage between 0.00 (0%) and 1.00 (100%)",
+        description="Tax rate as a decimal percentage between 0.00 (0%) and 1.00 (100%) with up to 4 decimal places",
     )
     items: List[InvoiceItemCreate] = Field(
         default_factory=list,
-        description="List of invoice line items (can be empty)",
+        max_length=500,
+        description="List of invoice line items (up to 500 items)",
     )
     notes: Optional[str] = Field(
         default=None,
         max_length=1000,
         description="Optional administrative notes or payment instructions",
     )
+
+    @field_validator("tax_rate")
+    @classmethod
+    def validate_tax_rate_scale(cls, v: Decimal) -> Decimal:
+        """Enforce maximum of 4 decimal places on tax_rate (matching Numeric(5, 4))."""
+        exp = v.as_tuple().exponent
+        if isinstance(exp, int) and exp < -4:
+            raise ValueError("tax_rate must have at most 4 decimal places")
+        return v
+
+    @field_validator("items")
+    @classmethod
+    def validate_items_total(cls, items: List[InvoiceItemCreate]) -> List[InvoiceItemCreate]:
+        """Guard against monetary overflow by enforcing a maximum invoice subtotal limit."""
+        subtotal = sum((Decimal(item.quantity) * item.unit_price for item in items), Decimal("0.00"))
+        if subtotal > Decimal("9999999999.99"):
+            raise ValueError("Invoice subtotal exceeds maximum permitted monetary value ($9,999,999,999.99)")
+        return items
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 

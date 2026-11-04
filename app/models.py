@@ -2,17 +2,21 @@
 
 import enum
 from datetime import datetime
+
 from sqlalchemy import (
     Column,
-    String,
-    Integer,
-    Numeric,
-    Text,
     DateTime,
     ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+)
+from sqlalchemy import (
     Enum as SqlEnum,
 )
 from sqlalchemy.orm import relationship
+
 from app.database import Base
 
 
@@ -33,7 +37,7 @@ class Invoice(Base):
     id = Column(String(36), primary_key=True, index=True)
     customer_name = Column(String(255), nullable=False)
     customer_email = Column(String(255), nullable=False)
-    status = Column(
+    status: Column[InvoiceStatus] = Column(
         SqlEnum(InvoiceStatus, name="invoice_status_enum", native_enum=False),
         nullable=False,
         default=InvoiceStatus.ISSUED,

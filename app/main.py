@@ -2,11 +2,13 @@
 
 from contextlib import asynccontextmanager
 from typing import List, Optional
-from fastapi import FastAPI, Depends, Header, Query, Response, status
+
+from fastapi import Depends, FastAPI, Header, Query, Response, status
 from fastapi.exceptions import RequestValidationError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+import app.crud as crud
 from app.config import settings
 from app.database import Base, engine, get_db
 from app.errors import (
@@ -24,7 +26,6 @@ from app.schemas import (
     InvoiceCreate,
     InvoiceResponse,
 )
-import app.crud as crud
 
 
 @asynccontextmanager
@@ -86,8 +87,11 @@ def create_invoice_endpoint(
     - Subsequent differing submissions: Returns HTTP 409 Conflict.
     """
     if idempotency_key is not None:
-        if not idempotency_key.strip():
+        stripped_key = idempotency_key.strip()
+        if not stripped_key:
             raise BadRequestException("Idempotency-Key header cannot be empty or contain only whitespace.")
+        if len(stripped_key) > 128:
+            raise BadRequestException("Idempotency-Key header cannot exceed 128 characters.")
 
     invoice, is_new = crud.create_invoice(
         db=db,

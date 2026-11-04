@@ -2,12 +2,17 @@
 
 import hashlib
 import json
+import random
+import time
 import uuid
-from decimal import Decimal, ROUND_HALF_UP
-from typing import List, Optional, Tuple
-from sqlalchemy.exc import IntegrityError
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any, List, Optional, Sequence, Tuple, Union
+
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
+
 from app.errors import (
+    DatabaseBusyException,
     EntityNotFoundException,
     IdempotencyConflictException,
     InvalidStateTransitionException,
@@ -32,7 +37,7 @@ def calculate_line_total(quantity: int, unit_price: Decimal) -> Decimal:
 
 
 def calculate_invoice_totals(
-    items: List[any],
+    items: Sequence[Any],
     tax_rate: Decimal,
 ) -> Tuple[Decimal, Decimal, Decimal]:
     """Calculate subtotal, tax amount, and grand total using exact Decimal arithmetic.
@@ -78,103 +83,120 @@ def create_invoice(
     db: Session,
     invoice_in: InvoiceCreate,
     idempotency_key: Optional[str] = None,
-) -> Tuple[Invoice, bool]:
+) -> Tuple[Union[Invoice, InvoiceResponse], bool]:
     """Create a new invoice atomically.
 
     Guarantees:
     - ACID Transaction: If any step fails, entire transaction is rolled back.
-    - Idempotency: Replaying with identical key returns cached invoice (is_new=False).
+    - Idempotency: Replaying with identical key returns cached original response (is_new=False).
     - Conflict Detection: Replaying key with differing payload raises 409 Conflict.
     - Exact Arithmetic: All totals calculated with Decimal ROUND_HALF_UP.
+    - Concurrency Safety: Bounded retries with exponential backoff & jitter handle SQLite locks.
 
     Returns:
-        Tuple of (invoice, is_new: bool)
+        Tuple of (invoice_or_response, is_new: bool)
     """
     payload_dict = invoice_in.model_dump(mode="json")
     payload_hash = compute_payload_hash(payload_dict)
+    cleaned_key = idempotency_key.strip() if idempotency_key else None
 
-    if idempotency_key:
-        cleaned_key = idempotency_key.strip()
+    if cleaned_key:
         existing_rec = db.query(IdempotencyRecord).filter(IdempotencyRecord.key == cleaned_key).first()
         if existing_rec:
             if existing_rec.request_hash == payload_hash:
-                # Payload matches: replay idempotent response
-                cached_data = json.loads(existing_rec.response_body)
-                cached_invoice = get_invoice(db, cached_data["id"])
-                if cached_invoice:
-                    return cached_invoice, False
+                # Payload matches: replay exact original response snapshot
+                cached_response = InvoiceResponse.model_validate_json(str(existing_rec.response_body))
+                return cached_response, False
             else:
                 # Key reused with differing payload: reject with 409 Conflict
                 raise IdempotencyConflictException(cleaned_key)
 
-    try:
-        invoice_id = f"inv_{uuid.uuid4().hex[:12]}"
-        subtotal, tax_amount, total_amount = calculate_invoice_totals(invoice_in.items, invoice_in.tax_rate)
+    max_tx_attempts = 5
+    for tx_attempt in range(max_tx_attempts):
+        try:
+            invoice_id = f"inv_{uuid.uuid4().hex[:12]}"
+            subtotal, tax_amount, total_amount = calculate_invoice_totals(invoice_in.items, invoice_in.tax_rate)
 
-        db_invoice = Invoice(
-            id=invoice_id,
-            customer_name=invoice_in.customer_name,
-            customer_email=invoice_in.customer_email,
-            status=InvoiceStatus.ISSUED,
-            currency=invoice_in.currency.upper(),
-            tax_rate=invoice_in.tax_rate,
-            subtotal=subtotal,
-            tax_amount=tax_amount,
-            total_amount=total_amount,
-            notes=invoice_in.notes,
-        )
-        db.add(db_invoice)
-        db.flush()
-
-        for item_in in invoice_in.items:
-            line_total = calculate_line_total(item_in.quantity, item_in.unit_price)
-            db_item = InvoiceItem(
-                invoice_id=db_invoice.id,
-                description=item_in.description,
-                quantity=item_in.quantity,
-                unit_price=item_in.unit_price,
-                line_total=line_total,
+            db_invoice = Invoice(
+                id=invoice_id,
+                customer_name=invoice_in.customer_name,
+                customer_email=invoice_in.customer_email,
+                status=InvoiceStatus.ISSUED,
+                currency=invoice_in.currency.upper(),
+                tax_rate=invoice_in.tax_rate,
+                subtotal=subtotal,
+                tax_amount=tax_amount,
+                total_amount=total_amount,
+                notes=invoice_in.notes,
             )
-            db.add(db_item)
+            db.add(db_invoice)
+            db.flush()
 
-        db.flush()
+            for item_in in invoice_in.items:
+                line_total = calculate_line_total(item_in.quantity, item_in.unit_price)
+                db_item = InvoiceItem(
+                    invoice_id=db_invoice.id,
+                    description=item_in.description,
+                    quantity=item_in.quantity,
+                    unit_price=item_in.unit_price,
+                    line_total=line_total,
+                )
+                db.add(db_item)
 
-        if idempotency_key:
-            response_schema = InvoiceResponse.model_validate(db_invoice)
-            idem_record = IdempotencyRecord(
-                key=idempotency_key.strip(),
-                request_path="/invoices/",
-                request_hash=payload_hash,
-                response_code=201,
-                response_body=response_schema.model_dump_json(),
-            )
-            db.add(idem_record)
+            db.flush()
 
-        db.commit()
-        return db_invoice, True
+            if cleaned_key:
+                response_schema = InvoiceResponse.model_validate(db_invoice)
+                idem_record = IdempotencyRecord(
+                    key=cleaned_key,
+                    request_path="/invoices/",
+                    request_hash=payload_hash,
+                    response_code=201,
+                    response_body=response_schema.model_dump_json(),
+                )
+                db.add(idem_record)
 
-    except IntegrityError:
-        db.rollback()
-        # Handle concurrent race condition where another thread committed this idempotency key
-        if idempotency_key:
-            cleaned_key = idempotency_key.strip()
-            import time
-            for _ in range(10):
-                winner_rec = db.query(IdempotencyRecord).filter(IdempotencyRecord.key == cleaned_key).first()
-                if winner_rec:
-                    if winner_rec.request_hash == payload_hash:
-                        cached_data = json.loads(winner_rec.response_body)
-                        cached_invoice = get_invoice(db, cached_data["id"])
-                        if cached_invoice:
-                            return cached_invoice, False
-                    else:
-                        raise IdempotencyConflictException(cleaned_key)
-                time.sleep(0.02)
-        raise
+            db.commit()
+            return db_invoice, True
 
-    except Exception:
-        db.rollback()
-        raise
+        except (IntegrityError, OperationalError) as exc:
+            db.rollback()
+
+            # Handle concurrent race condition where another thread committed this idempotency key
+            if cleaned_key:
+                max_poll_retries = 15
+                base_delay = 0.01  # 10ms
+                max_delay = 0.25   # 250ms
+                for attempt in range(max_poll_retries):
+                    delay = min(max_delay, base_delay * (1.5 ** attempt)) + random.uniform(0.001, 0.015)
+                    time.sleep(delay)
+                    try:
+                        winner_rec = db.query(IdempotencyRecord).filter(IdempotencyRecord.key == cleaned_key).first()
+                        if winner_rec:
+                            if winner_rec.request_hash == payload_hash:
+                                cached_response = InvoiceResponse.model_validate_json(str(winner_rec.response_body))
+                                return cached_response, False
+                            else:
+                                raise IdempotencyConflictException(cleaned_key)
+                    except OperationalError:
+                        continue
+
+            # If OperationalError (database lock) and transaction attempts remain, backoff and retry
+            if isinstance(exc, OperationalError):
+                if tx_attempt < max_tx_attempts - 1:
+                    backoff = min(0.3, 0.02 * (2 ** tx_attempt)) + random.uniform(0.005, 0.025)
+                    time.sleep(backoff)
+                    continue
+                raise DatabaseBusyException("Database lock contention exceeded maximum retry threshold.") from exc
+
+            # Otherwise, unresolvable IntegrityError -> re-raise
+            raise
+
+        except Exception:
+            db.rollback()
+            raise
+
+    raise DatabaseBusyException("Failed to complete invoice creation after maximum transaction retries.")
 
 
 def pay_invoice(db: Session, invoice_id: str) -> Invoice:
@@ -193,7 +215,7 @@ def pay_invoice(db: Session, invoice_id: str) -> Invoice:
         )
 
     try:
-        invoice.status = InvoiceStatus.PAID
+        invoice.status = InvoiceStatus.PAID  # type: ignore[assignment]
         db.commit()
         db.refresh(invoice)
         return invoice
@@ -218,7 +240,7 @@ def cancel_invoice(db: Session, invoice_id: str) -> Invoice:
         )
 
     try:
-        invoice.status = InvoiceStatus.CANCELLED
+        invoice.status = InvoiceStatus.CANCELLED  # type: ignore[assignment]
         db.commit()
         db.refresh(invoice)
         return invoice

@@ -1,10 +1,9 @@
 """Standardized API exception hierarchy and FastAPI exception handlers."""
 
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
+
 from fastapi import Request
-from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 class AppException(Exception):
@@ -69,25 +68,37 @@ class BadRequestException(AppException):
         )
 
 
-async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
+class DatabaseBusyException(AppException):
+    """Raised when database lock contention exceeds retry bounds (HTTP 503)."""
+
+    def __init__(self, message: str = "Database is busy due to concurrent writes. Please retry shortly."):
+        super().__init__(
+            status_code=503,
+            code="DATABASE_BUSY",
+            message=message,
+        )
+
+
+async def app_exception_handler(request: Request, exc: Any) -> JSONResponse:
     """Format custom domain exceptions into standard error envelopes."""
     return JSONResponse(
-        status_code=exc.status_code,
+        status_code=getattr(exc, "status_code", 500),
         content={
             "error": {
-                "code": exc.code,
-                "message": exc.message,
-                "details": exc.details,
+                "code": getattr(exc, "code", "APP_ERROR"),
+                "message": getattr(exc, "message", str(exc)),
+                "details": getattr(exc, "details", None),
             }
         },
     )
 
 
-async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+async def validation_exception_handler(request: Request, exc: Any) -> JSONResponse:
     """Format Pydantic schema validation failures into standard error envelopes (HTTP 422)."""
     # Clean up error details for JSON serialization
     details = []
-    for error in exc.errors():
+    errors: List[Dict[str, Any]] = getattr(exc, "errors", lambda: [])()
+    for error in errors:
         details.append(
             {
                 "field": ".".join(str(loc) for loc in error.get("loc", [])),
@@ -108,14 +119,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+async def http_exception_handler(request: Request, exc: Any) -> JSONResponse:
     """Format standard Starlette HTTPExceptions into the unified envelope."""
+    detail = getattr(exc, "detail", "HTTP request error")
     return JSONResponse(
-        status_code=exc.status_code,
+        status_code=getattr(exc, "status_code", 400),
         content={
             "error": {
                 "code": "HTTP_ERROR",
-                "message": exc.detail if isinstance(exc.detail, str) else "HTTP request error",
+                "message": detail if isinstance(detail, str) else "HTTP request error",
                 "details": None,
             }
         },

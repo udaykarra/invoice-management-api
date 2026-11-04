@@ -20,6 +20,10 @@ ENV/
 .pytest_cache/
 .coverage
 htmlcov/
+.mutmut-cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
 
 # Environment variables
 .env

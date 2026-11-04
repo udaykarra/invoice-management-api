@@ -5,14 +5,20 @@ Acts as an automated contract tester:
 - Spawns the FastAPI application with an isolated in-memory SQLite database.
 - Feeds deterministic inputs and validates strict behavioral contracts (HTTP codes,
   JSON schema contracts, exact decimal math, idempotency invariants, ACID rollbacks).
+- Executes multi-candidate evaluation benchmarks across all 3 AI coding tasks:
+    1. tasks/invoice_total (financial calculation)
+    2. tasks/invoice_discount (discount calculation & capping)
+    3. tasks/invoice_concurrency (concurrent idempotency & conflict handling)
+- Distinguishes candidate behavioral rejections from verifier infrastructure errors.
 - Runs independently without pytest: `python verifier.py`.
-- Exits with 0 on complete contract compliance, 1 on any violation.
+- Exits with 0 on complete compliance, 1 on any violation.
 """
 
 import sys
 import time
 from decimal import Decimal
 from typing import Callable, List, Tuple
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -265,6 +271,76 @@ class ContractVerifier:
         assert res.status_code == 422, f"Expected 422 for scale > 2, got {res.status_code}"
         assert res.json()["error"]["code"] == "VALIDATION_ERROR"
 
+    def verify_oversized_idempotency_key(self):
+        payload = {
+            "customer_name": "Oversized Key Corp",
+            "customer_email": "oversized@corp.com",
+            "items": [{"description": "Item", "quantity": 1, "unit_price": "10.00"}],
+        }
+        res = self.client.post("/invoices/", json=payload, headers={"Idempotency-Key": "k" * 129})
+        assert res.status_code == 400, f"Expected 400 for key > 128 chars, got {res.status_code}"
+        assert res.json()["error"]["code"] == "BAD_REQUEST"
+
+    def verify_tax_rate_scale_constraint(self):
+        payload = {
+            "customer_name": "Tax Scale Corp",
+            "customer_email": "taxscale@corp.com",
+            "tax_rate": "0.12345",
+            "items": [{"description": "Item", "quantity": 1, "unit_price": "10.00"}],
+        }
+        res = self.client.post("/invoices/", json=payload)
+        assert res.status_code == 422, f"Expected 422 for tax scale > 4, got {res.status_code}"
+        assert res.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    def verify_quantity_upper_bound_constraint(self):
+        payload = {
+            "customer_name": "High Qty Corp",
+            "customer_email": "highqty@corp.com",
+            "items": [{"description": "Item", "quantity": 1_000_001, "unit_price": "10.00"}],
+        }
+        res = self.client.post("/invoices/", json=payload)
+        assert res.status_code == 422, f"Expected 422 for qty > 1M, got {res.status_code}"
+        assert res.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    def verify_monetary_subtotal_limit(self):
+        payload = {
+            "customer_name": "Billionaire Corp",
+            "customer_email": "billion@corp.com",
+            "items": [{"description": "Item", "quantity": 100, "unit_price": "999999999.99"}],
+        }
+        res = self.client.post("/invoices/", json=payload)
+        assert res.status_code == 422, f"Expected 422 for subtotal > max limit, got {res.status_code}"
+        assert res.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    def verify_item_count_limit(self):
+        payload = {
+            "customer_name": "Huge Payload Corp",
+            "customer_email": "huge@corp.com",
+            "items": [{"description": f"Item {i}", "quantity": 1, "unit_price": "1.00"} for i in range(501)],
+        }
+        res = self.client.post("/invoices/", json=payload)
+        assert res.status_code == 422, f"Expected 422 for items > 500, got {res.status_code}"
+        assert res.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    def verify_idempotency_snapshot_replay(self):
+        headers = {"Idempotency-Key": "verifier_snapshot_replay_key"}
+        payload = {
+            "customer_name": "Snapshot Verifier",
+            "customer_email": "snap@verifier.com",
+            "items": [{"description": "Item", "quantity": 1, "unit_price": "50.00"}],
+        }
+        res1 = self.client.post("/invoices/", json=payload, headers=headers)
+        assert res1.status_code == 201
+        inv_id = res1.json()["id"]
+
+        # Pay invoice
+        self.client.post(f"/invoices/{inv_id}/pay")
+
+        # Replay request
+        res2 = self.client.post("/invoices/", json=payload, headers=headers)
+        assert res2.status_code == 200
+        assert res2.json()["status"] == "ISSUED", "Replayed invoice must return original ISSUED snapshot"
+
 
 def main() -> int:
     print(f"\n{Colors.CYAN}{Colors.BOLD}========================================================")
@@ -288,6 +364,12 @@ def main() -> int:
         ("Contract 11: ACID Transaction Atomicity & Mid-Flight Rollback", verifier.verify_atomic_transaction_rollback),
         ("Contract 12: Idempotency Key Whitespace Rejection (HTTP 400)", verifier.verify_whitespace_idempotency_key),
         ("Contract 13: Unit Price Decimal Scale Constraint (Max 2 Scale)", verifier.verify_unit_price_scale_constraint),
+        ("Contract 14: Idempotency Key Oversized Header Rejection (> 128 Chars)", verifier.verify_oversized_idempotency_key),
+        ("Contract 15: Tax Rate Decimal Scale Constraint (Max 4 Scale)", verifier.verify_tax_rate_scale_constraint),
+        ("Contract 16: Maximum Quantity Constraint Rejection (> 1,000,000)", verifier.verify_quantity_upper_bound_constraint),
+        ("Contract 17: Monetary Subtotal Upper Bound Protection", verifier.verify_monetary_subtotal_limit),
+        ("Contract 18: Maximum Line Items Payload Count Guard (> 500 Items)", verifier.verify_item_count_limit),
+        ("Contract 19: Idempotency Original Response Snapshot Fidelity", verifier.verify_idempotency_snapshot_replay),
     ]
 
     for name, test_fn in contracts:
@@ -304,13 +386,32 @@ def main() -> int:
 
     verifier.close()
 
-    # Priority 2: Execute the Candidate Solution Evaluation Benchmark
-    from tasks.invoice_total.verifier import run_benchmark_verification
-    benchmark_failures = run_benchmark_verification()
+    # Benchmark Task 1: invoice_total
+    from tasks.invoice_total.verifier import run_benchmark_verification as run_task1
+    bench1_failures = run_task1()
 
-    total_failures = failed + benchmark_failures
+    # Benchmark Task 2: invoice_discount
+    from tasks.invoice_discount.verifier import run_benchmark_verification as run_task2
+    bench2_failures = run_task2()
+
+    # Benchmark Task 3: invoice_concurrency
+    from tasks.invoice_concurrency.verifier import run_benchmark_verification as run_task3
+    bench3_failures = run_task3()
+
+    total_bench_failures = bench1_failures + bench2_failures + bench3_failures
+    total_failures = failed + total_bench_failures
+
+    print(f"{Colors.BOLD}========================================================{Colors.RESET}")
+    print("  FINAL VERIFICATION SUMMARY")
+    print(f"  API Contracts Passed: {passed}/{total}")
+    print(f"  Task 1 Failures: {bench1_failures}")
+    print(f"  Task 2 Failures: {bench2_failures}")
+    print(f"  Task 3 Failures: {bench3_failures}")
+    print(f"  Total Violations: {total_failures}")
+    print(f"{Colors.BOLD}========================================================{Colors.RESET}\n")
+
     if total_failures == 0:
-        print(f"{Colors.GREEN}{Colors.BOLD}>>> VERIFICATION SUCCESS: All API contracts & candidate benchmarks passed! <<<{Colors.RESET}\n")
+        print(f"{Colors.GREEN}{Colors.BOLD}>>> VERIFICATION SUCCESS: All 19 API contracts & all 3 AI benchmarks passed! <<<{Colors.RESET}\n")
         return 0
     else:
         print(f"{Colors.RED}{Colors.BOLD}>>> VERIFICATION FAILURE: {total_failures} violations detected. <<<{Colors.RESET}\n")

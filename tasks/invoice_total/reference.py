@@ -1,7 +1,8 @@
 """Official Reference Implementation for the invoice_total task."""
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from typing import List, Union
+
 from tasks.invoice_total.contract import InvoiceTotals, LineItem
 
 TWO_PLACES = Decimal("0.01")

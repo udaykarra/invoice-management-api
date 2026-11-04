@@ -4,10 +4,10 @@ import sys
 # Ensure repository root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from decimal import Decimal
-from typing import Callable, Tuple
-from tasks.invoice_total.contract import InvoiceTotals, InvoiceTotalFunction
-from tasks.invoice_total.test_cases import VALID_TEST_CASES, MALFORMED_TEST_CASES
+from typing import Tuple
+
+from tasks.invoice_total.contract import InvoiceTotalFunction, InvoiceTotals
+from tasks.invoice_total.test_cases import MALFORMED_TEST_CASES, VALID_TEST_CASES
 
 
 def verify_implementation(candidate_fn: InvoiceTotalFunction) -> Tuple[bool, str]:
@@ -50,12 +50,12 @@ def verify_implementation(candidate_fn: InvoiceTotalFunction) -> Tuple[bool, str
 def run_benchmark_verification() -> int:
     """Run verification across reference, valid variants, and deliberately flawed implementations."""
     from tasks.invoice_total.reference import calculate_invoice_totals as ref_impl
-    from tasks.invoice_total.solutions.candidate_valid_iterative import calculate_invoice_totals as valid_a
-    from tasks.invoice_total.solutions.candidate_valid_functional import calculate_invoice_totals as valid_b
-    from tasks.invoice_total.solutions.candidate_invalid_float import calculate_invoice_totals as invalid_float
     from tasks.invoice_total.solutions.candidate_invalid_bankers import calculate_invoice_totals as invalid_bankers
-    from tasks.invoice_total.solutions.candidate_invalid_unscaled import calculate_invoice_totals as invalid_unscaled
+    from tasks.invoice_total.solutions.candidate_invalid_float import calculate_invoice_totals as invalid_float
     from tasks.invoice_total.solutions.candidate_invalid_negative import calculate_invoice_totals as invalid_negative
+    from tasks.invoice_total.solutions.candidate_invalid_unscaled import calculate_invoice_totals as invalid_unscaled
+    from tasks.invoice_total.solutions.candidate_valid_functional import calculate_invoice_totals as valid_b
+    from tasks.invoice_total.solutions.candidate_valid_iterative import calculate_invoice_totals as valid_a
 
     candidates = [
         ("Reference Implementation", ref_impl, True),

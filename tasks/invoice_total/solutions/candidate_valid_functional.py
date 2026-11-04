@@ -1,8 +1,9 @@
 """Candidate Valid Solution B: Functional map-reduce architecture using Decimal."""
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from functools import reduce
 from typing import List, Union
+
 from tasks.invoice_total.contract import InvoiceTotals, LineItem
 
 SCALE = Decimal("0.01")

@@ -1,5 +1,6 @@
 import os
 import tempfile
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -19,6 +20,7 @@ engine = create_engine(
 with engine.connect() as conn:
     conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
     conn.exec_driver_sql("PRAGMA foreign_keys=ON;")
+    conn.exec_driver_sql("PRAGMA busy_timeout=30000;")
 
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
 

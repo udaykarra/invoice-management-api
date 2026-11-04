@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 from typing import List, Union
+
 from tasks.invoice_total.contract import InvoiceTotals, LineItem
 
 

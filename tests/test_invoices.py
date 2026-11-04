@@ -1,11 +1,8 @@
 """Comprehensive test suite verifying financial precision, idempotency, validation, error contracts, and ACID transactions."""
 
 from decimal import Decimal
-import pytest
-from app.models import Invoice, InvoiceItem, InvoiceStatus
-from app.errors import IdempotencyConflictException, InvalidStateTransitionException
-import app.crud as crud
 
+from app.models import Invoice, InvoiceItem
 
 # ============================================================================
 # Task 1: Calculations & Financial Precision Tests (Decimal, Rounding, Zeroes)
@@ -535,8 +532,9 @@ def test_concurrent_conflicting_idempotent_requests(client, db_session):
     6. Exactly one associated idempotency record exists and its payload matches the winner.
     """
     import concurrent.futures
-    import threading
     import json
+    import threading
+
     from app.models import IdempotencyRecord
 
     key = "concurrent_conflict_race_key_999"
@@ -591,4 +589,73 @@ def test_concurrent_conflicting_idempotent_requests(client, db_session):
     stored_record_body = json.loads(records[0].response_body)
     assert stored_record_body["id"] == stored_invoice.id
     assert stored_record_body["customer_name"] == winner_payload["customer_name"]
+
+
+def test_idempotency_oversized_key_rejected(client):
+    """Reject an Idempotency-Key exceeding 128 characters with HTTP 400 Bad Request."""
+    payload = {
+        "customer_name": "Oversized Key Org",
+        "customer_email": "oversized@org.com",
+        "items": [{"description": "Item", "quantity": 1, "unit_price": "10.00"}],
+    }
+    long_key = "k" * 129
+    response = client.post("/invoices/", json=payload, headers={"Idempotency-Key": long_key})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "BAD_REQUEST"
+    assert "cannot exceed 128 characters" in response.json()["error"]["message"]
+
+
+def test_validation_tax_rate_scale_exceeding_four_decimal_places(client):
+    """Reject tax_rate with more than 4 decimal places (matching DB scale) with HTTP 422."""
+    payload = {
+        "customer_name": "Scale Org",
+        "customer_email": "scale@org.com",
+        "tax_rate": "0.12345",
+        "items": [{"description": "Item", "quantity": 1, "unit_price": "10.00"}],
+    }
+    response = client.post("/invoices/", json=payload)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert "tax_rate must have at most 4 decimal places" in str(response.json())
+
+
+def test_validation_quantity_upper_bound(client):
+    """Reject line item quantity exceeding 1,000,000 with HTTP 422."""
+    payload = {
+        "customer_name": "High Qty Org",
+        "customer_email": "qty@org.com",
+        "items": [{"description": "Bulk Item", "quantity": 1_000_001, "unit_price": "1.00"}],
+    }
+    response = client.post("/invoices/", json=payload)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_validation_excessive_subtotal_limit(client):
+    """Reject invoice where calculated subtotal exceeds maximum allowable limit with HTTP 422."""
+    payload = {
+        "customer_name": "Billionaire Org",
+        "customer_email": "rich@org.com",
+        "items": [
+            {"description": "Mega Asset", "quantity": 100, "unit_price": "999999999.99"},
+        ],
+    }
+    response = client.post("/invoices/", json=payload)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert "exceeds maximum permitted monetary value" in str(response.json())
+
+
+def test_validation_excessive_item_count(client):
+    """Reject invoice payloads with more than 500 line items with HTTP 422."""
+    items = [{"description": f"Item {i}", "quantity": 1, "unit_price": "1.00"} for i in range(501)]
+    payload = {
+        "customer_name": "Huge Payload Org",
+        "customer_email": "huge@org.com",
+        "items": items,
+    }
+    response = client.post("/invoices/", json=payload)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
 
