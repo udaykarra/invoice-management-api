@@ -23,7 +23,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, get_db
 from app.main import app
-from app.models import IdempotencyRecord, Invoice
+from app.models import IdempotencyRecord, Invoice, InvoiceItem
 
 POSTGRES_TEST_URL = os.getenv(
     "TEST_POSTGRES_URL",
@@ -62,9 +62,19 @@ def pg_engine():
 
 @pytest.fixture(scope="function")
 def pg_session(pg_engine):
-    """Function-scoped session fixture with table cleanup."""
+    """Function-scoped session with per-test table cleanup for full isolation.
+
+    Truncates all tables in FK-safe order (InvoiceItem → Invoice →
+    IdempotencyRecord) *before* yielding so every test starts from a
+    completely empty database regardless of what a previous test left behind.
+    """
     Session = sessionmaker(autocommit=False, autoflush=False, bind=pg_engine, expire_on_commit=False)
     session = Session()
+    # Pre-test cleanup in FK-safe order so each test starts with an empty schema.
+    session.query(InvoiceItem).delete()
+    session.query(Invoice).delete()
+    session.query(IdempotencyRecord).delete()
+    session.commit()
     try:
         yield session
     finally:
